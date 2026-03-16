@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package glrd;
+
+service GlrdService {
+  rpc ReportarIncidente (Incidente) returns (Respuesta);
+}
+
+message ArchivoAfectado {
+  string ruta = 1;
+  string ext = 2;
+  int64 bytes = 3;
+}
+
+message Incidente {
+  uint32 pid = 1;
+  string nombre_proceso = 2;
+  string ruta_ejecutable = 3;
+  string usuario_so = 4;
+  double entropia_promedio = 5;
+  uint32 archivos_afectados = 6;
+  string ruta_ejemplo = 7;
+  string accion_tomada = 8;
+  string timestamp_deteccion = 9;
+  string timestamp_resolucion = 10;
+  repeated ArchivoAfectado archivos = 11;
+}
+
+message Respuesta {
+  bool ok = 1;
+  string message = 2;
+}
