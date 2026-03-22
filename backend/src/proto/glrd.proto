@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package glrd;
 
-option java_multiple_files = true;
-option java_package = "com.gargoyle.lrd.grpc";
 
 service GlrdService {
   rpc ReportarIncidente (Incidente) returns (Respuesta);
