@@ -2,6 +2,7 @@ use crate::engine::Engine;
 use crate::proc::leer_archivos_abiertos;
 use crate::hitl;
 use crate::store::Store;
+use crate::grpc::GlrdClient;
 use aya::maps::perf::AsyncPerfEventArray;
 use aya::util::online_cpus;
 use aya::Ebpf;
@@ -16,6 +17,7 @@ pub async fn run(
     bpf: &mut Ebpf,
     engine: Arc<Engine>,
     store: Arc<Store>,
+    grpc: GlrdClient,
 ) -> anyhow::Result<()> {
 
     let mut perf_array = AsyncPerfEventArray::try_from(
@@ -26,6 +28,7 @@ pub async fn run(
         let mut buf = perf_array.open(cpu_id, None)?;
         let engine = Arc::clone(&engine);
         let store = Arc::clone(&store);
+        let grpc = grpc.clone();
 
         task::spawn(async move {
             let mut buffers = vec![BytesMut::with_capacity(
@@ -52,7 +55,7 @@ pub async fn run(
                         if let Err(e) = store.insertar(&event) {
                             eprintln!("sled error: {}", e);
                         }
-                        handle_alerta(event, archivos, Arc::clone(&store)).await;
+                        handle_alerta(event, archivos, Arc::clone(&store), grpc.clone()).await;
                     }
                 }
             }
@@ -66,8 +69,8 @@ async fn handle_alerta(
     mut event: GlrdEvent,
     archivos: Vec<ArchivoAfectado>,
     store: Arc<Store>,
+    mut grpc: GlrdClient,
 ) {
-    // spawn_blocking porque hitl::ejecutar() bloquea en stdin
     let event_clone = event.clone();
     let archivos_clone = archivos.clone();
 
@@ -82,15 +85,24 @@ async fn handle_alerta(
             event.accion_tomada = "KILL".to_string();
             event.timestamp_resolucion = timestamp_resolucion;
 
-            // Actualizar en sled con los campos completos
             if let Err(e) = store.insertar(&event) {
                 eprintln!("sled update error: {}", e);
+            }
+
+            match grpc.reportar(&event, archivos).await {
+                Ok(_) => {
+                    println!("[gRPC] incidente enviado a Spring Boot");
+                    let _ = store.confirmar(event.timestamp_ns);
+                }
+                Err(e) => {
+                    eprintln!("[gRPC] error al enviar: {} - evento en buffer sled", e);
+                }
             }
         }
         hitl::Decision::Descartar => {
             event.accion_tomada = "IGNORED".to_string();
-            // No se envía a Spring Boot — se elimina del buffer
             let _ = store.confirmar(event.timestamp_ns);
+            println!("[HITL] evento descartado por operador");
         }
     }
 }
