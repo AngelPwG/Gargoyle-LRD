@@ -1,23 +1,33 @@
-// src/listener.rs
-
+use crate::engine::Engine;
+use crate::proc::leer_archivos_abiertos;
+use crate::hitl;
+use crate::store::Store;
 use aya::maps::perf::AsyncPerfEventArray;
 use aya::util::online_cpus;
 use aya::Ebpf;
-use bytes::BytesMut;
+use prost::bytes::BytesMut;
 use tokio::task;
-
+use std::sync::Arc;
 use crate::event::{GlrdEvent, GlrdEventRaw};
+use crate::user::resolve_username;
+use crate::grpc::proto::ArchivoAfectado;
 
-pub async fn run(bpf: &mut Ebpf) -> anyhow::Result<()> {
+pub async fn run(
+    bpf: &mut Ebpf,
+    engine: Arc<Engine>,
+    store: Arc<Store>,
+) -> anyhow::Result<()> {
+
     let mut perf_array = AsyncPerfEventArray::try_from(
-        bpf.map_mut("GLRD_EVENTS").expect("mapa GLRD_EVENTS no encontrado"),
+        bpf.take_map("GLRD_EVENTS").expect("mapa GLRD_EVENTS no encontrado"),
     )?;
 
-    for cpu_id in online_cpus()? {
+    for cpu_id in online_cpus().map_err(|(_, e)| e)? {
         let mut buf = perf_array.open(cpu_id, None)?;
+        let engine = Arc::clone(&engine);
+        let store = Arc::clone(&store);
 
         task::spawn(async move {
-            // Un buffer por CPU — aya entrega un evento por poll
             let mut buffers = vec![BytesMut::with_capacity(
                 std::mem::size_of::<GlrdEventRaw>(),
             )];
@@ -26,11 +36,24 @@ pub async fn run(bpf: &mut Ebpf) -> anyhow::Result<()> {
                 let events = buf.read_events(&mut buffers).await.unwrap();
 
                 for i in 0..events.read {
-                    let raw: GlrdEventRaw =
-                        *aya::Pod::from_bytes(&buffers[i]).unwrap();
+                    let raw: GlrdEventRaw = unsafe {
+                        std::ptr::read(buffers[i].as_ptr() as *const GlrdEventRaw)
+                    };
 
-                    let event = GlrdEvent::from_raw(&raw);
-                    handle_event(event).await;
+                    let mut event = GlrdEvent::from_raw(&raw);
+
+                    // Resolver usuario independientemente de si llegó como
+                    // nombre o como UID numérico
+                    event.usuario_so = resolve_username(&event.usuario_so);
+
+                    if engine.es_sospechoso(&event) {
+                        let archivos = leer_archivos_abiertos(event.pid);
+
+                        if let Err(e) = store.insertar(&event) {
+                            eprintln!("sled error: {}", e);
+                        }
+                        handle_alerta(event, archivos, Arc::clone(&store)).await;
+                    }
                 }
             }
         });
@@ -39,14 +62,35 @@ pub async fn run(bpf: &mut Ebpf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_event(event: GlrdEvent) {
-    // Por ahora solo imprimimos — aquí irá la lógica de entropía + HITL
-    println!(
-        "[{}] pid={} proceso={} entropía={:.4} archivos={}",
-        event.timestamp_ns,
-        event.pid,
-        event.nombre_proceso,
-        event.entropia,
-        event.archivos_afectados,
-    );
+async fn handle_alerta(
+    mut event: GlrdEvent,
+    archivos: Vec<ArchivoAfectado>,
+    store: Arc<Store>,
+) {
+    // spawn_blocking porque hitl::ejecutar() bloquea en stdin
+    let event_clone = event.clone();
+    let archivos_clone = archivos.clone();
+
+    let decision = tokio::task::spawn_blocking(move || {
+        hitl::ejecutar(&event_clone, &archivos_clone)
+    })
+    .await
+    .unwrap_or(hitl::Decision::Descartar);
+
+    match decision {
+        hitl::Decision::Kill { timestamp_resolucion } => {
+            event.accion_tomada = "KILL".to_string();
+            event.timestamp_resolucion = timestamp_resolucion;
+
+            // Actualizar en sled con los campos completos
+            if let Err(e) = store.insertar(&event) {
+                eprintln!("sled update error: {}", e);
+            }
+        }
+        hitl::Decision::Descartar => {
+            event.accion_tomada = "IGNORED".to_string();
+            // No se envía a Spring Boot — se elimina del buffer
+            let _ = store.confirmar(event.timestamp_ns);
+        }
+    }
 }

@@ -1,7 +1,6 @@
-use aya::Pod;
-
+use serde::Serialize;
 #[repr(C)]
-#[derive(Copy, Clone, Pod)]
+#[derive(Copy, Clone)]
 pub struct GlrdEventRaw {
     pub pid: u32,
     pub nombre_proceso: [u8; 255],
@@ -13,6 +12,7 @@ pub struct GlrdEventRaw {
     pub timestamp_ns: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct GlrdEvent {
     pub pid: u32,
     pub nombre_proceso: String,
@@ -22,6 +22,9 @@ pub struct GlrdEvent {
     pub archivos_afectados: u32,
     pub entropia: f64,
     pub timestamp_ns: u64,
+
+    pub accion_tomada: String,
+    pub timestamp_resolucion: String,
 }
 
 impl GlrdEvent {
@@ -35,6 +38,8 @@ impl GlrdEvent {
             archivos_afectados: raw.archivos_afectados,
             entropia: raw.entropia_x10000 as f64 / 10_000.0,
             timestamp_ns: raw.timestamp_ns,
+            accion_tomada: String::new(),
+            timestamp_resolucion: String::new(),
         }
     }
 }
@@ -43,3 +48,5 @@ fn cstr_to_string(buf: &[u8]) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
+
+unsafe impl aya::Pod for GlrdEventRaw {}
